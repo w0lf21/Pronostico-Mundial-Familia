@@ -138,20 +138,50 @@ const app = {
     const loginScreen = document.getElementById('login-screen');
     const appScreen = document.getElementById('app-screen');
 
-    // Animación de salida del login — zoom out como cámara alejándose
-    loginScreen.style.animation = 'loginFadeOut 0.5s ease forwards';
+    // Reproducir sonido de entrada (descomenta cuando subas el archivo)
+    this.playEntrySound();
 
-    setTimeout(() => {
-      loginScreen.classList.remove('active');
-      loginScreen.style.animation = '';
-      appScreen.classList.add('active');
-      appScreen.style.animation = 'appStadiumReveal 0.6s ease both';
-    }, 450);
+    // Crear overlay de zoom + flash dorado
+    const overlay = document.createElement('div');
+    overlay.id = 'entry-overlay';
+    overlay.innerHTML = `
+      <div class="entry-flash"></div>
+      <img src="logo-mundial-2026.jpg" alt="" class="entry-logo">
+    `;
+    document.body.appendChild(overlay);
 
+    // Pre-cargar la app debajo del overlay
     document.getElementById('header-username').textContent = this.user.display_name;
     await this.refreshPoints();
     this.renderNav();
     this.navigate('fixture');
+
+    // Transición: login → overlay con zoom → flash → app
+    loginScreen.style.transition = 'opacity 0.3s ease';
+    loginScreen.style.opacity = '0';
+
+    setTimeout(() => {
+      loginScreen.classList.remove('active');
+      loginScreen.style.opacity = '';
+      loginScreen.style.transition = '';
+      appScreen.classList.add('active');
+    }, 300);
+
+    // Remover overlay después de toda la animación (1.6s)
+    setTimeout(() => {
+      overlay.style.opacity = '0';
+      setTimeout(() => overlay.remove(), 400);
+    }, 1600);
+  },
+
+  playEntrySound() {
+    try {
+      const audio = new Audio('entry-sound.mp3');
+      audio.volume = 0.6;
+      audio.play().catch(() => {
+        // El navegador bloqueó el sonido o no existe el archivo, ignorar silenciosamente
+      });
+    } catch (e) { /* archivo no existe aún, ignorar */ }
   },
 
   logout() {
@@ -216,6 +246,7 @@ const app = {
 
   renderFixture(main) {
     this._fixtureTab = this._fixtureTab || 'groups';
+    this._mypredLoaded = false;
 
     // Calcular posiciones reales de cada grupo
     const groupMatches = this.matches.filter(m => m.phase === 'groups');
@@ -484,6 +515,7 @@ const app = {
       <div class="fixture-tabs">
         <button class="fixture-tab ${this._fixtureTab === 'groups' ? 'active' : ''}" data-tab="groups">Fase de Grupos</button>
         <button class="fixture-tab ${this._fixtureTab === 'finals' ? 'active' : ''}" data-tab="finals">Eliminatorias</button>
+        <button class="fixture-tab ${this._fixtureTab === 'mypred' ? 'active' : ''}" data-tab="mypred">⚽ Mi Pronóstico</button>
       </div>
       <div class="fixture-tab-content ${this._fixtureTab === 'groups' ? 'active' : ''}" id="ftab-groups">
         <div class="fixture-groups-grid">${groupsHtml}</div>
@@ -491,6 +523,9 @@ const app = {
       <div class="fixture-tab-content ${this._fixtureTab === 'finals' ? 'active' : ''}" id="ftab-finals">
         <div class="pw-scroll-hint">← Desliza horizontalmente para ver el bracket completo →</div>
         <div class="pw-bracket-wrapper">${bracketDesktopHtml}</div>
+      </div>
+      <div class="fixture-tab-content ${this._fixtureTab === 'mypred' ? 'active' : ''}" id="ftab-mypred">
+        <div id="mypred-content" style="text-align:center;color:var(--color-text-muted);padding:2rem">Cargando mi pronóstico...</div>
       </div>
     `;
 
@@ -502,8 +537,276 @@ const app = {
         main.querySelectorAll('.fixture-tab-content').forEach(c => c.classList.remove('active'));
         main.getElementById ? null : main.querySelector(`#ftab-${this._fixtureTab}`).classList.add('active');
         document.getElementById(`ftab-${this._fixtureTab}`).classList.add('active');
+        if (btn.dataset.tab === 'mypred' && !this._mypredLoaded) {
+          this._mypredLoaded = true;
+          this.loadMyPredictions();
+        }
       });
     });
+    if (this._fixtureTab === 'mypred') {
+      this._mypredLoaded = true;
+      this.loadMyPredictions();
+    }
+  },
+
+  // ── MI PRONÓSTICO ──────────────────────────────────────────────────────────
+
+  async loadMyPredictions() {
+    const container = document.getElementById('mypred-content');
+    if (!container) return;
+    container.innerHTML = '<div style="text-align:center;color:var(--color-text-muted);padding:2rem">Cargando mi pronóstico...</div>';
+
+    try {
+      const [classified, freshPreds, podiumData] = await Promise.all([
+        this.api('/predictions/classified'),
+        this.api('/predictions'),
+        this.api('/podium').catch(() => null)
+      ]);
+      // Refrescar predicciones locales para que "Mis marcadores" siempre esté al día
+      this.predictions = Object.fromEntries(freshPreds.map(p => [p.match_id, p]));
+
+      // Si el usuario no tiene pronósticos, mostrar mensaje claro en vez de tablas vacías
+      const groupMatches = this.matches.filter(m => m.phase === 'groups');
+      const filledGroup = groupMatches.filter(m => this.predictions[m.id] && this.predictions[m.id].pred_home != null).length;
+      if (filledGroup === 0) {
+        container.innerHTML = `<div style="text-align:center;padding:2.5rem 1rem">
+          <div style="font-size:2.2rem;margin-bottom:8px">📝</div>
+          <p style="color:var(--color-text-muted);font-size:14px">Aún no tienes pronósticos registrados${!this.lockStatus.locked ? '.<br>Ve a la pestaña <strong>Grupos</strong> para llenarlos.' : '.'}</p>
+        </div>`;
+        return;
+      }
+
+      const groupColors = {
+        A:'#1a5c8a', B:'#6b21a8', C:'#166534', D:'#991b1b',
+        E:'#0f766e', F:'#92400e', G:'#5b21b6', H:'#1e40af',
+        I:'#9d174d', J:'#065f46', K:'#7c2d12', L:'#164e63'
+      };
+
+      // ── Grupos con predicciones ──
+      const matchesByGroup = {};
+      groupMatches.forEach(m => {
+        if (!matchesByGroup[m.group_name]) matchesByGroup[m.group_name] = [];
+        matchesByGroup[m.group_name].push(m);
+      });
+
+      const groupsHtml = Object.keys(classified.groups).sort().map(g => {
+        const standings = classified.groups[g];
+        const color = groupColors[g] || '#C9A84C';
+        const gMatches = matchesByGroup[g] || [];
+
+        const matchesHtml = gMatches.map(m => {
+          const pred = this.predictions[m.id];
+          const home = this.teamByCode(m.home_team);
+          const away = this.teamByCode(m.away_team);
+          const ph = pred ? pred.pred_home : null;
+          const pa = pred ? pred.pred_away : null;
+          const hasPred = ph != null && pa != null;
+          return `<div style="display:flex;align-items:center;gap:4px;font-size:11px;padding:2px 0;${!hasPred ? 'opacity:0.4' : ''}">
+            <span style="flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${home.flag} ${home.name}</span>
+            <span style="font-weight:700;min-width:32px;text-align:center;background:var(--color-background-secondary);border-radius:4px;padding:1px 4px">${hasPred ? ph + '-' + pa : '–'}</span>
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${away.flag} ${away.name}</span>
+          </div>`;
+        }).join('');
+
+        return `
+          <div class="fixture-group-card" style="border-left:3px solid ${color}">
+            <div class="fixture-group-title" style="color:${color}">Grupo ${g}</div>
+            <table class="fixture-group-table">
+              <thead><tr><th></th><th>Equipo</th><th>PJ</th><th>Pts</th><th>GD</th></tr></thead>
+              <tbody>
+                ${standings.map((t, i) => `
+                  <tr class="${t.classified ? 'classified' : ''}" ${i === 2 && classified.best8Thirds.some(b => b.code === t.team) ? 'style="background:rgba(201,168,76,0.08)"' : ''}>
+                    <td style="font-size:11px;color:var(--color-text-muted)">${i+1}</td>
+                    <td><span style="margin-right:4px">${t.team_info.flag}</span>${t.team_info.name}</td>
+                    <td style="text-align:center">${t.played}</td>
+                    <td style="text-align:center;font-weight:${t.classified?'700':'400'}">${t.pts}</td>
+                    <td style="text-align:center">${t.gd > 0 ? '+' : ''}${t.gd}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+            <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--color-border)">
+              <div style="font-size:10px;font-weight:600;color:var(--color-text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Mis marcadores</div>
+              ${matchesHtml}
+            </div>
+          </div>`;
+      }).join('');
+
+      // ── Mejores terceros ──
+      const best8Html = classified.best8Thirds.length > 0 ? `
+        <div style="margin:12px 0;padding:10px;background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-md)">
+          <div style="font-size:11px;font-weight:700;color:var(--color-primary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Mis 8 mejores terceros clasificados</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            ${classified.best8Thirds.map(t => `<span style="font-size:12px;padding:3px 8px;background:rgba(201,168,76,0.1);border:1px solid rgba(201,168,76,0.25);border-radius:12px">${t.flag} ${t.name}</span>`).join('')}
+          </div>
+        </div>` : '';
+
+      // ── Bracket: equipos REALES del fixture + pronósticos del usuario en cascada ──
+      // R32 arranca con los equipos reales que el admin va completando
+      // De ahí en adelante, cada llave se llena con el ganador que el usuario pronosticó
+      const matchesById = {};
+      this.matches.forEach(m => { matchesById[m.id] = m; });
+
+      const QF_PAIRS  = { 'QF-1': ['R32-2','R32-6'], 'QF-2': ['R32-1','R32-3'], 'QF-3': ['R32-4','R32-5'], 'QF-4': ['R32-7','R32-8'], 'QF-5': ['R32-11','R32-12'], 'QF-6': ['R32-9','R32-10'], 'QF-7': ['R32-15','R32-14'], 'QF-8': ['R32-13','R32-16'] };
+      const SF_PAIRS  = { 'SF-1': ['QF-1','QF-2'], 'SF-2': ['QF-3','QF-4'], 'SF-3': ['QF-5','QF-6'], 'SF-4': ['QF-7','QF-8'], 'SF-5': ['SF-1','SF-2'], 'SF-6': ['SF-3','SF-4'] };
+      const FINAL_PAIR = ['SF-5','SF-6'];
+
+      // Calcula el ganador pronosticado por el usuario para una llave
+      // (deriva del marcador; si empate, usa pred_winner para penales)
+      const userWinnerOf = (matchId, homeCode, awayCode) => {
+        const pred = this.predictions[matchId];
+        if (!pred) return null;
+        const ph = pred.pred_home != null ? parseInt(pred.pred_home) : null;
+        const pa = pred.pred_away != null ? parseInt(pred.pred_away) : null;
+        if (ph != null && pa != null && ph !== pa) return ph > pa ? homeCode : awayCode;
+        return pred.pred_winner || null;
+      };
+      const userLoserOf = (matchId, homeCode, awayCode) => {
+        const w = userWinnerOf(matchId, homeCode, awayCode);
+        if (!w) return null;
+        return w === homeCode ? awayCode : homeCode;
+      };
+
+      // Resuelve los equipos de cada llave en cascada (memoizado)
+      const resolved = {};
+      const resolveMatch = (matchId) => {
+        if (resolved[matchId]) return resolved[matchId];
+
+        let homeCode = null, awayCode = null;
+
+        if (matchId.startsWith('R32')) {
+          // R32 usa los equipos REALES del fixture
+          const m = matchesById[matchId];
+          homeCode = m?.home_team || null;
+          awayCode = m?.away_team || null;
+        } else if (QF_PAIRS[matchId]) {
+          const [a, b] = QF_PAIRS[matchId];
+          const ra = resolveMatch(a);
+          const rb = resolveMatch(b);
+          homeCode = userWinnerOf(a, ra.homeCode, ra.awayCode);
+          awayCode = userWinnerOf(b, rb.homeCode, rb.awayCode);
+        } else if (SF_PAIRS[matchId]) {
+          const [a, b] = SF_PAIRS[matchId];
+          const ra = resolveMatch(a);
+          const rb = resolveMatch(b);
+          homeCode = userWinnerOf(a, ra.homeCode, ra.awayCode);
+          awayCode = userWinnerOf(b, rb.homeCode, rb.awayCode);
+        } else if (matchId === 'FINAL') {
+          const [a, b] = FINAL_PAIR;
+          const ra = resolveMatch(a);
+          const rb = resolveMatch(b);
+          homeCode = userWinnerOf(a, ra.homeCode, ra.awayCode);
+          awayCode = userWinnerOf(b, rb.homeCode, rb.awayCode);
+        } else if (matchId === 'TP') {
+          // 3er puesto: perdedores de SF-5 y SF-6 según el usuario
+          const ra = resolveMatch('SF-5');
+          const rb = resolveMatch('SF-6');
+          homeCode = userLoserOf('SF-5', ra.homeCode, ra.awayCode);
+          awayCode = userLoserOf('SF-6', rb.homeCode, rb.awayCode);
+        }
+
+        resolved[matchId] = { homeCode, awayCode };
+        return resolved[matchId];
+      };
+
+      const myMatchCard = (matchId) => {
+        const { homeCode, awayCode } = resolveMatch(matchId);
+        const home = homeCode ? this.teamByCode(homeCode) : null;
+        const away = awayCode ? this.teamByCode(awayCode) : null;
+        const pred = this.predictions[matchId];
+        const hasPred = !!(pred && (pred.pred_home != null || pred.pred_winner != null));
+
+        const predWinner = homeCode && awayCode ? userWinnerOf(matchId, homeCode, awayCode) : null;
+
+        const showScore = pred && pred.pred_home != null;
+        const penH = pred && pred.pred_pen_home != null ? `(${pred.pred_pen_home})` : '';
+        const penA = pred && pred.pred_pen_away != null ? `(${pred.pred_pen_away})` : '';
+
+        if (!home && !away) return `<div class="bk-match empty"><div class="bk-team"><span class="bk-name" style="opacity:0.5">Por definir</span></div><div class="bk-team"><span class="bk-name" style="opacity:0.5">Por definir</span></div></div>`;
+
+        return `<div class="bk-match${hasPred ? ' played' : ''}">
+          <div class="bk-team ${predWinner && home && predWinner === home.code ? 'winner' : predWinner && home ? 'loser' : ''}">
+            <span class="bk-flag">${home?.flag || '?'}</span>
+            <span class="bk-name">${home?.name || 'Por definir'}</span>
+            ${showScore ? `<span class="bk-score">${pred.pred_home}${penH}</span>` : ''}
+          </div>
+          <div class="bk-team ${predWinner && away && predWinner === away.code ? 'winner' : predWinner && away ? 'loser' : ''}">
+            <span class="bk-flag">${away?.flag || '?'}</span>
+            <span class="bk-name">${away?.name || 'Por definir'}</span>
+            ${showScore ? `<span class="bk-score">${pred.pred_away}${penA}</span>` : ''}
+          </div>
+        </div>`;
+      };
+
+      const myCol = (matchIds, label) => `
+        <div class="pw-col">
+          <div class="pw-col-label">${label}</div>
+          <div class="pw-col-matches">
+            ${matchIds.map(id => myMatchCard(id)).join('')}
+          </div>
+        </div>`;
+
+      const myBracketHtml = `
+        <div class="pw-bracket">
+          <div class="pw-side pw-left">
+            ${myCol(['R32-1','R32-2','R32-3','R32-4','R32-5','R32-6','R32-7','R32-8'], 'Dieciseisavos')}
+            ${myCol(['QF-1','QF-2','QF-3','QF-4'], 'Octavos')}
+            ${myCol(['SF-1','SF-2'], 'Cuartos')}
+            ${myCol(['SF-5'], 'Semis')}
+          </div>
+          <div class="pw-center">
+            <div class="pw-center-label">Gran Final</div>
+            ${myMatchCard('FINAL')}
+            <div class="pw-center-label" style="margin-top:16px">3er Puesto</div>
+            ${myMatchCard('TP')}
+          </div>
+          <div class="pw-side pw-right">
+            ${myCol(['SF-6'], 'Semis')}
+            ${myCol(['SF-3','SF-4'], 'Cuartos')}
+            ${myCol(['QF-5','QF-6','QF-7','QF-8'], 'Octavos')}
+            ${myCol(['R32-9','R32-10','R32-11','R32-12','R32-13','R32-14','R32-15','R32-16'], 'Dieciseisavos')}
+          </div>
+        </div>`;
+
+      // ── Podio predicho ──
+      let podiumHtml = '';
+      if (podiumData && podiumData.first_place) {
+        const t1 = this.teamByCode(podiumData.first_place);
+        const t2 = podiumData.second_place ? this.teamByCode(podiumData.second_place) : null;
+        const t3 = podiumData.third_place ? this.teamByCode(podiumData.third_place) : null;
+        podiumHtml = `
+          <div style="margin:12px 0;padding:10px;background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-md)">
+            <div style="font-size:11px;font-weight:700;color:var(--color-primary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Mi podio</div>
+            <div style="display:flex;justify-content:center;gap:16px;flex-wrap:wrap">
+              <div style="text-align:center"><div style="font-size:22px">🥇</div><div style="font-size:13px;font-weight:700">${t1.flag} ${t1.name}</div></div>
+              ${t2 ? `<div style="text-align:center"><div style="font-size:22px">🥈</div><div style="font-size:13px;font-weight:600">${t2.flag} ${t2.name}</div></div>` : ''}
+              ${t3 ? `<div style="text-align:center"><div style="font-size:22px">🥉</div><div style="font-size:13px;font-weight:600">${t3.flag} ${t3.name}</div></div>` : ''}
+            </div>
+          </div>`;
+      }
+
+      // Contador de predicciones
+      const totalGroupMatches = groupMatches.length;
+      const koMatchIds = ['R32-1','R32-2','R32-3','R32-4','R32-5','R32-6','R32-7','R32-8','R32-9','R32-10','R32-11','R32-12','R32-13','R32-14','R32-15','R32-16','QF-1','QF-2','QF-3','QF-4','QF-5','QF-6','QF-7','QF-8','SF-1','SF-2','SF-3','SF-4','SF-5','SF-6','TP','FINAL'];
+      const filledKo = koMatchIds.filter(id => this.predictions[id] && (this.predictions[id].pred_winner != null || this.predictions[id].pred_home != null)).length;
+
+      container.innerHTML = `
+        <div style="margin-bottom:12px;padding:10px 14px;background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-md);font-size:13px">
+          <strong style="color:var(--color-primary)">📊 Resumen:</strong>
+          Grupos: <strong>${filledGroup}/${totalGroupMatches}</strong> partidos pronosticados ·
+          Eliminatorias: <strong>${filledKo}/${koMatchIds.length}</strong> llaves completadas
+        </div>
+        <h3 style="font-size:14px;color:var(--color-primary);margin:16px 0 8px">Fase de Grupos</h3>
+        <div class="fixture-groups-grid">${groupsHtml}</div>
+        ${best8Html}
+        <h3 style="font-size:14px;color:var(--color-primary);margin:20px 0 8px">Eliminatorias</h3>
+        <div class="pw-scroll-hint">← Desliza horizontalmente para ver tu bracket →</div>
+        <div class="pw-bracket-wrapper">${myBracketHtml}</div>
+        ${podiumHtml}
+      `;
+    } catch (e) {
+      container.innerHTML = `<div style="text-align:center;color:var(--color-error);padding:2rem">Error al cargar: ${e.message}</div>`;
+    }
   },
 
   // ── HOY ────────────────────────────────────────────────────────────────────
