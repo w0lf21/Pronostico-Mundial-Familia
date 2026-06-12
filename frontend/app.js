@@ -2043,7 +2043,10 @@ const app = {
   async renderAdminPollasConfig() {
     const container = document.getElementById('admin-pollas-config');
     try {
-      const s = await this.api('/settings');
+      const [s, ls] = await Promise.all([
+        this.api('/settings'),
+        this.api('/predictions/lock-status')
+      ]);
       container.innerHTML = `
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
           <div>
@@ -2099,7 +2102,35 @@ const app = {
         </div>
         <button class="btn-primary" style="width:auto;margin-top:12px" onclick="app.savePollaSettings()">Guardar configuración</button>
         <div class="success-msg" id="pollas-config-msg" style="margin-top:8px"></div>
+        <div style="margin-top:16px;padding:12px;background:var(--color-background-secondary);border-radius:var(--radius-md);border:1px solid var(--color-border)">
+          <div style="font-size:12px;font-weight:700;color:var(--color-primary);margin-bottom:10px">🔒 Control manual de bloqueo</div>
+          <div style="display:grid;gap:8px">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+              <span style="font-size:12px">⚽ Pronóstico 1 (Grupos) — <strong id="lock1-status">Cargando...</strong></span>
+              <div style="display:flex;gap:6px">
+                <button class="btn-sm" style="background:#166534;color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:11px" onclick="app.setPollaLock('polla1','unlock')">🔓 Abrir</button>
+                <button class="btn-sm" style="background:#991b1b;color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:11px" onclick="app.setPollaLock('polla1','lock')">🔒 Cerrar</button>
+                <button class="btn-sm" style="background:transparent;color:var(--color-text-muted);border:1px solid var(--color-border);border-radius:4px;padding:4px 10px;cursor:pointer;font-size:11px" onclick="app.setPollaLock('polla1','auto')">⏱ Auto</button>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+              <span style="font-size:12px">🏆 Pronóstico 2 (Eliminatorias) — <strong id="lock2-status">Cargando...</strong></span>
+              <div style="display:flex;gap:6px">
+                <button class="btn-sm" style="background:#166534;color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:11px" onclick="app.setPollaLock('polla2','unlock')">🔓 Abrir</button>
+                <button class="btn-sm" style="background:#991b1b;color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:11px" onclick="app.setPollaLock('polla2','lock')">🔒 Cerrar</button>
+                <button class="btn-sm" style="background:transparent;color:var(--color-text-muted);border:1px solid var(--color-border);border-radius:4px;padding:4px 10px;cursor:pointer;font-size:11px" onclick="app.setPollaLock('polla2','auto')">⏱ Auto</button>
+              </div>
+            </div>
+          </div>
+          <div style="font-size:10px;color:var(--color-text-muted);margin-top:8px">⏱ Auto = vuelve al bloqueo automático por hora del partido</div>
+          <div class="success-msg" id="lock-msg" style="margin-top:6px"></div>
+        </div>
       `;
+      // Actualizar estado real de bloqueo
+      const el1 = document.getElementById('lock1-status');
+      const el2 = document.getElementById('lock2-status');
+      if (el1) el1.textContent = ls.polla1Locked ? '🔒 Bloqueado' : '🟢 Abierto';
+      if (el2) el2.textContent = ls.polla2Locked ? '🔒 Bloqueado' : '🟢 Abierto';
     } catch (e) { container.innerHTML = `<div style="color:var(--color-danger)">Error: ${e.message}</div>`; }
   },
 
@@ -2124,6 +2155,30 @@ const app = {
       msg.textContent = '✓ Configuración guardada.';
       setTimeout(() => msg.textContent = '', 3000);
     } catch (e) { msg.textContent = e.message; msg.style.color = 'var(--color-danger)'; }
+  },
+
+  async setPollaLock(polla, action) {
+    const msg = document.getElementById('lock-msg');
+    try {
+      const result = await this.api(`/admin/pollas/${polla}/lock`, {
+        method: 'PUT',
+        body: JSON.stringify({ action })
+      });
+      const labels = { lock: '🔒 Cerrado manualmente', unlock: '🟢 Abierto manualmente', auto: '⏱ Automático' };
+      if (polla === 'polla1') {
+        const el = document.getElementById('lock1-status');
+        if (el) el.textContent = action === 'auto' ? (result.locked ? '🔒 Bloqueado (auto)' : '🟢 Abierto (auto)') : labels[action];
+      } else {
+        const el = document.getElementById('lock2-status');
+        if (el) el.textContent = action === 'auto' ? (result.polla2Locked ? '🔒 Bloqueado (auto)' : '🟢 Abierto (auto)') : labels[action];
+      }
+      // Actualizar lockStatus local para que el frontend refleje el cambio
+      const ls = await this.api('/predictions/lock-status');
+      this.lockStatus = ls;
+      msg.style.color = 'var(--color-success)';
+      msg.textContent = `✓ Polla ${polla === 'polla1' ? '1' : '2'} ${action === 'lock' ? 'cerrada' : action === 'unlock' ? 'abierta' : 'en modo automático'}.`;
+      setTimeout(() => msg.textContent = '', 3000);
+    } catch(e) { msg.style.color = 'var(--color-danger)'; msg.textContent = e.message; }
   },
 
   async renderAdminPollasRegs() {
